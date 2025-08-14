@@ -19,14 +19,14 @@ func main() {
         "/app",
         http.FileServer(http.Dir("."),
     ))))
-    mux.HandleFunc("/healthz", healthCheck)
-    mux.HandleFunc("/metrics", cfg.hitCounter)
-    mux.HandleFunc("/reset", cfg.reset)
+    mux.HandleFunc("GET /api/healthz", healthz)
+    mux.HandleFunc("GET /admin/metrics", cfg.metrics)
+    mux.HandleFunc("POST /admin/reset", cfg.reset)
 
     server.ListenAndServe()
 }
 
-func healthCheck(rw http.ResponseWriter, _ *http.Request) {
+func healthz(rw http.ResponseWriter, _ *http.Request) {
     rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
     rw.WriteHeader(http.StatusOK)
 
@@ -47,12 +47,18 @@ func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
     })
 }
 
-func (a *apiConfig) hitCounter(rw http.ResponseWriter, _ *http.Request) {
-    rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
+func (a *apiConfig) metrics(rw http.ResponseWriter, _ *http.Request) {
+    rw.Header().Set("Content-Type", "text/html; charset=utf-8")
     rw.WriteHeader(http.StatusOK)
 
-    count := fmt.Sprintf("Hits: %d", a.fileserverHits.Load())
-    _, err := rw.Write([]byte(count))
+    ht := fmt.Sprintf(`
+<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+  </body>
+</html>`, a.fileserverHits.Load())
+    _, err := rw.Write([]byte(ht))
     if err != nil {
         fmt.Println(err)
     }
