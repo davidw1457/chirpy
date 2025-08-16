@@ -1,8 +1,10 @@
 package main
 
 import (
+    "encoding/json"
     "fmt"
     "net/http"
+    "strings"
     "sync/atomic"
 )
 
@@ -20,19 +22,21 @@ func main() {
         http.FileServer(http.Dir("."),
     ))))
     mux.HandleFunc("GET /api/healthz", healthz)
+    mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+
     mux.HandleFunc("GET /admin/metrics", cfg.metrics)
     mux.HandleFunc("POST /admin/reset", cfg.reset)
 
     server.ListenAndServe()
 }
 
-func healthz(rw http.ResponseWriter, _ *http.Request) {
+func healthz(rw http.ResponseWriter, rq *http.Request) {
     rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
     rw.WriteHeader(http.StatusOK)
 
     _, err := rw.Write([]byte("OK"))
     if err != nil {
-        fmt.Println(err)
+        fmt.Printf("healthz(%v, %v): %v\n", rw, rq, err)
     }
 }
 
@@ -47,7 +51,7 @@ func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
     })
 }
 
-func (a *apiConfig) metrics(rw http.ResponseWriter, _ *http.Request) {
+func (a *apiConfig) metrics(rw http.ResponseWriter, rq *http.Request) {
     rw.Header().Set("Content-Type", "text/html; charset=utf-8")
     rw.WriteHeader(http.StatusOK)
 
@@ -60,11 +64,11 @@ func (a *apiConfig) metrics(rw http.ResponseWriter, _ *http.Request) {
 </html>`, a.fileserverHits.Load())
     _, err := rw.Write([]byte(ht))
     if err != nil {
-        fmt.Println(err)
+        fmt.Printf("apiConfig.metrics(%v, %v): %v\n", rw, rq, err)
     }
 }
 
-func (a *apiConfig) reset(rw http.ResponseWriter, _ *http.Request) {
+func (a *apiConfig) reset(rw http.ResponseWriter, rq *http.Request) {
     a.fileserverHits.Store(0)
     
     rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -72,7 +76,71 @@ func (a *apiConfig) reset(rw http.ResponseWriter, _ *http.Request) {
 
     _, err := rw.Write([]byte("counter reset"))
     if err != nil {
-        fmt.Println(err)
+        fmt.Printf("apiConfig.reset(%v, %v): %v\n", rw, rq, err)
     }
 }
 
+func validateChirp(rw http.ResponseWriter, rq *http.Request) {
+    type chirp struct {
+        Body string `json:"body"`
+    }
+
+    decoder := json.NewDecoder(rq.Body)
+    chrp := chirp{}
+    err := decoder.Decode(&chrp)
+    if err != nil {
+        fmt.Printf("validateChirp(%v, %v): %v\n", rw, rq, err)
+        rw.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+
+    chrp.Body = cleanString(chrp.Body)
+    
+    if len(chrp.Body) <= 140 {
+        type response struct {
+            CleanedBody string `json:"cleaned_body"`
+        }
+        respBody := response{CleanedBody: chrp.Body}
+        dat, err := json.Marshal(respBody)
+        if err != nil {
+            fmt.Printf("validateChirp(%v, %v): %v\n", rw, rq, err)
+            rw.WriteHeader(http.StatusInternalServerError)
+            return
+        }
+        rw.Header().Set("Content-Type", "application/json")
+        rw.WriteHeader(http.StatusOK)
+        rw.Write(dat)
+    } else {
+        type response struct {
+            Error string `json:"error"`
+        }
+        respBody := response{Error:"Chirp is too long"}
+        dat, err := json.Marshal(respBody)
+        if err != nil {
+            fmt.Printf("validateChirp(%v, %v): %v\n", rw, rq, err)
+            rw.WriteHeader(http.StatusInternalServerError)
+            return
+        }
+        rw.Header().Set("Content-Type", "application/json")
+        rw.WriteHeader(http.StatusBadRequest)
+        rw.Write(dat)
+    }
+}
+
+func cleanString(s string) string {
+    badWords := []string{"kerfuffle", "sharbert", "fornax"}
+    
+    var cleaned string
+    for _, b := range badWords {
+        for _, w := range strings.Fields(s) {
+            if strings.ToLower(w) == b {
+                cleaned = fmt.Sprintf("%s ****", cleaned)
+            } else {
+                cleaned = fmt.Sprintf("%s %s", cleaned, w)
+            }
+        }
+        s = cleaned
+        cleaned = ""
+    }
+    return s[1:]
+}
