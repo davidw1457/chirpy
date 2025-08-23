@@ -4,11 +4,27 @@ import (
     "encoding/json"
     "fmt"
     "net/http"
+    "os"
+    "database/sql"
     "strings"
     "sync/atomic"
+
+    _ "github.com/lib/pq"
+
+    "github.com/davidw1457/chirpy/internal/database"
 )
 
 func main() {
+    dbURL := os.Getenv("DB_URL")
+
+    db, err := sql.Open("postgres",  dbURL)
+    if err != nil {
+        fmt.Println(err)
+        os.Exit(1)
+    }
+
+    dbQueries := database.New(db)
+
     mux := http.NewServeMux()
 
     server := http.Server{
@@ -16,7 +32,7 @@ func main() {
         Addr: ":8080",
     }
 
-    cfg := apiConfig{}
+    cfg := apiConfig{qry: dbQueries}
     mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix(
         "/app",
         http.FileServer(http.Dir("."),
@@ -42,6 +58,7 @@ func healthz(rw http.ResponseWriter, rq *http.Request) {
 
 type apiConfig struct {
     fileserverHits atomic.Int32
+    qry *database.Queries
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
