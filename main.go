@@ -7,7 +7,11 @@ import (
     "os"
     "database/sql"
     "strings"
+    "time"
     "sync/atomic"
+
+    "github.com/google/uuid"
+    "github.com/joho/godotenv"
 
     _ "github.com/lib/pq"
 
@@ -15,7 +19,11 @@ import (
 )
 
 func main() {
+    godotenv.Load()
+
     dbURL := os.Getenv("DB_URL")
+    platform := os.Getenv("PLATFORM")
+
 
     db, err := sql.Open("postgres",  dbURL)
     if err != nil {
@@ -32,7 +40,7 @@ func main() {
         Addr: ":8080",
     }
 
-    cfg := apiConfig{qry: dbQueries}
+    cfg := apiConfig{qry: dbQueries, platform: platform}
     mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix(
         "/app",
         http.FileServer(http.Dir("."),
@@ -42,6 +50,7 @@ func main() {
 
     mux.HandleFunc("GET /admin/metrics", cfg.metrics)
     mux.HandleFunc("POST /admin/reset", cfg.reset)
+    mux.HandleFunc("POST /api/users", cfg.addUser)
 
     server.ListenAndServe()
 }
@@ -58,6 +67,7 @@ func healthz(rw http.ResponseWriter, rq *http.Request) {
 
 type apiConfig struct {
     fileserverHits atomic.Int32
+    platform string
     qry *database.Queries
 }
 
@@ -86,12 +96,22 @@ func (a *apiConfig) metrics(rw http.ResponseWriter, rq *http.Request) {
 }
 
 func (a *apiConfig) reset(rw http.ResponseWriter, rq *http.Request) {
+    if a.platform != "dev" {
+        rw.WriteHeader(http.StatusForbidden)
+        return
+    }
     a.fileserverHits.Store(0)
+    err := a.qry.ResetUsers(rq.Context())
+    if err != nil {
+        fmt.Printf("apiConfig.reset(%v, %v): %v\n", rw, rq, err)
+        rw.WriteHeader(http.StatusInternalServerError)
+        return
+    }
     
     rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
     rw.WriteHeader(http.StatusOK)
 
-    _, err := rw.Write([]byte("counter reset"))
+    _, err = rw.Write([]byte("counter reset"))
     if err != nil {
         fmt.Printf("apiConfig.reset(%v, %v): %v\n", rw, rq, err)
     }
@@ -160,4 +180,54 @@ func cleanString(s string) string {
         cleaned = ""
     }
     return s[1:]
+}
+
+func (a *apiConfig) addUser(rw http.ResponseWriter, rq *http.Request) {
+    type newUser struct {
+        Email string `json:"email"`
+    }
+
+    decoder := json.NewDecoder(rq.Body)
+    user := newUser{}
+    err := decoder.Decode(&user)
+    if err != nil {
+        fmt.Printf("apiConfig.addUser(%v, %v): %v\n", rw, rq, err)
+        rw.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+
+    if user.Email == "" {
+        rw.WriteHeader(http.StatusBadRequest)
+        return
+    }
+
+    r, err := a.qry.CreateUser(rq.Context(), user.Email)
+    if err != nil {
+        fmt.Printf("apiConfig.addUser(%v, %v): %v\n", rw, rq, err)
+        rw.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+
+    type response struct {
+        Id uuid.UUID `json:"id"`
+        CreatedAt time.Time `json:"created_at"`
+        UpdatedAt time.Time `json:"updated_at"`
+        Email string `json:"email"`
+    }
+    respBody := response{
+        Id: r.ID,
+        CreatedAt: r.CreatedAt,
+        UpdatedAt: r.UpdatedAt,
+        Email: r.Email,
+    }
+    
+    dat, err := json.Marshal(respBody)
+    if err != nil {
+        fmt.Printf("apiConfig.addUser(%v, %v): %v\n", rw, rq, err)
+        rw.WriteHeader(http.StatusInternalServerError)
+            return
+    }
+    rw.Header().Set("Content-Type", "application/json")
+    rw.WriteHeader(http.StatusCreated)
+    rw.Write(dat)
 }
