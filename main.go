@@ -46,7 +46,8 @@ func main() {
         http.FileServer(http.Dir("."),
     ))))
     mux.HandleFunc("GET /api/healthz", healthz)
-    mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+    mux.HandleFunc("POST /api/chirps", cfg.postChirp)
+    mux.HandleFunc("GET /api/chirps", cfg.getAllChirps)
 
     mux.HandleFunc("GET /admin/metrics", cfg.metrics)
     mux.HandleFunc("POST /admin/reset", cfg.reset)
@@ -117,13 +118,22 @@ func (a *apiConfig) reset(rw http.ResponseWriter, rq *http.Request) {
     }
 }
 
-func validateChirp(rw http.ResponseWriter, rq *http.Request) {
-    type chirp struct {
+type chirp struct {
+    Id uuid.UUID `json:"id"`
+    CreatedAt time.Time `json:"created_at"`
+    UpdatedAt time.Time `json:"updated_at"`
+    Body string `json:"body"`
+    UserId  uuid.UUID `json:"user_id"`
+}
+
+func (a *apiConfig) postChirp(rw http.ResponseWriter, rq *http.Request) {
+    type inputChirp struct {
         Body string `json:"body"`
+        UserId uuid.UUID `json:"user_id"`
     }
 
     decoder := json.NewDecoder(rq.Body)
-    chrp := chirp{}
+    chrp := inputChirp{}
     err := decoder.Decode(&chrp)
     if err != nil {
         fmt.Printf("validateChirp(%v, %v): %v\n", rw, rq, err)
@@ -131,13 +141,30 @@ func validateChirp(rw http.ResponseWriter, rq *http.Request) {
         return
     }
 
+    if chrp.Body == "" || len(chrp.UserId) == 0 {
+        rw.WriteHeader(http.StatusBadRequest)
+        return
+    }
+
     chrp.Body = cleanString(chrp.Body)
     
     if len(chrp.Body) <= 140 {
-        type response struct {
-            CleanedBody string `json:"cleaned_body"`
+        r, err := a.qry.CreateChirp(
+            rq.Context(),
+            database.CreateChirpParams{Body: chrp.Body, UserID: chrp.UserId},
+        )
+        if err != nil {
+            rw.WriteHeader(http.StatusInternalServerError)
+            return
         }
-        respBody := response{CleanedBody: chrp.Body}
+
+        respBody := chirp{
+            Id: r.ID,
+            CreatedAt: r.CreatedAt,
+            UpdatedAt: r.UpdatedAt,
+            Body: r.Body,
+            UserId: r.UserID,
+        }
         dat, err := json.Marshal(respBody)
         if err != nil {
             fmt.Printf("validateChirp(%v, %v): %v\n", rw, rq, err)
@@ -145,7 +172,7 @@ func validateChirp(rw http.ResponseWriter, rq *http.Request) {
             return
         }
         rw.Header().Set("Content-Type", "application/json")
-        rw.WriteHeader(http.StatusOK)
+        rw.WriteHeader(http.StatusCreated)
         rw.Write(dat)
     } else {
         type response struct {
@@ -229,5 +256,33 @@ func (a *apiConfig) addUser(rw http.ResponseWriter, rq *http.Request) {
     }
     rw.Header().Set("Content-Type", "application/json")
     rw.WriteHeader(http.StatusCreated)
+    rw.Write(dat)
+}
+
+func (a *apiConfig) getAllChirps(rw http.ResponseWriter, rq *http.Request) {
+    rows, err := a.qry.GetAllChirps(rq.Context())
+    if err != nil {
+        fmt.Printf("apiConfig.getAllChirps(%v, %v): %v\n", rw, rq, err)
+        return
+    }
+
+    chirps := make([]chirp, len(rows))
+    for i, r := range rows {
+        chirps[i] = chirp{
+            Id: r.ID,
+            CreatedAt: r.CreatedAt,
+            UpdatedAt: r.UpdatedAt,
+            Body: r.Body,
+            UserId: r.UserID,
+        }
+    }
+    dat, err := json.Marshal(chirps)
+    if err != nil {
+        fmt.Printf("apiConfig.getAllChirps(%v, %v): %v\n", rw, rq, err)
+        return
+    }
+
+    rw.Header().Set("Content-Type", "application/json")
+    rw.WriteHeader(http.StatusOK)
     rw.Write(dat)
 }
