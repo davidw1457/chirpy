@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -54,6 +55,8 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", cfg.reset)
 	mux.HandleFunc("POST /api/users", cfg.addUser)
 	mux.HandleFunc("POST /api/login", cfg.login)
+	mux.HandleFunc("POST /api/refresh", cfg.refresh)
+	mux.HandleFunc("POST /api/revoke", cfg.revoke)
 
 	server.ListenAndServe()
 }
@@ -322,7 +325,7 @@ func (a *apiConfig) getChirp(rw http.ResponseWriter, rq *http.Request) {
 	}
 
 	row, err := a.qry.GetChirp(rq.Context(), id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		rw.WriteHeader(http.StatusNotFound)
 		return
 	} else if err != nil {
@@ -352,18 +355,18 @@ func (a *apiConfig) getChirp(rw http.ResponseWriter, rq *http.Request) {
 }
 
 type user struct {
-	Id        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	Id           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 	type input struct {
-		Password         string `json:"password"`
-		Email            string `json:"email"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 
 	decoder := json.NewDecoder(rq.Body)
@@ -389,12 +392,27 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 		return
 	}
 
-	expiration := 3600 * time.Second
-	if inp.ExpiresInSeconds > 0 && inp.ExpiresInSeconds < 3600 {
-		expiration = time.Duration(inp.ExpiresInSeconds) * time.Second
+	tokenString, err := auth.MakeJWT(row.ID, a.secret, time.Hour)
+	if err != nil {
+		fmt.Printf("apiConfig.login: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
-	tokenString, err := auth.MakeJWT(row.ID, a.secret, expiration)
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		fmt.Printf("apiConfig.login: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	_, err = a.qry.CreateRefreshToken(
+		rq.Context(),
+		database.CreateRefreshTokenParams{
+			Token:  refreshToken,
+			UserID: row.ID,
+		},
+	)
 	if err != nil {
 		fmt.Printf("apiConfig.login: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
@@ -402,11 +420,12 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 	}
 
 	loggedInUser := user{
-		Id:        row.ID,
-		CreatedAt: row.CreatedAt,
-		UpdatedAt: row.UpdatedAt,
-		Email:     row.Email,
-		Token:     tokenString,
+		Id:           row.ID,
+		CreatedAt:    row.CreatedAt,
+		UpdatedAt:    row.UpdatedAt,
+		Email:        row.Email,
+		Token:        tokenString,
+		RefreshToken: refreshToken,
 	}
 
 	dat, err := json.Marshal(loggedInUser)
@@ -419,4 +438,66 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 	rw.Header().Set("Content-Type", "application/json")
 	rw.WriteHeader(http.StatusOK)
 	rw.Write(dat)
+}
+
+func (a *apiConfig) refresh(rw http.ResponseWriter, rq *http.Request) {
+	refreshToken, err := auth.GetBearerToken(rq.Header)
+	if err != nil {
+		fmt.Printf("a.refresh: %v\n", err)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	refreshTokenRow, err := a.qry.GetRefreshToken(rq.Context(), refreshToken)
+	if errors.Is(err, sql.ErrNoRows) {
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	} else if err != nil {
+		fmt.Printf("a.refresh: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	tokenString, err := auth.MakeJWT(
+		refreshTokenRow.UserID,
+		a.secret,
+		time.Hour,
+	)
+	if err != nil {
+		fmt.Printf("a.refresh: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	type response struct {
+		Token string `json:"token"`
+	}
+	tokenResp := response{Token: tokenString}
+
+	dat, err := json.Marshal(tokenResp)
+	if err != nil {
+		fmt.Printf("a.refresh: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	rw.Write(dat)
+}
+
+func (a *apiConfig) revoke(rw http.ResponseWriter, rq *http.Request) {
+	refreshToken, err := auth.GetBearerToken(rq.Header)
+	if err != nil {
+		fmt.Printf("a.revoke: %v\n", err)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	err = a.qry.RevokeRefreshToken(rq.Context(), refreshToken)
+	if err != nil {
+		fmt.Printf("a.revoke: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+	}
+	rw.WriteHeader(http.StatusNoContent)
 }

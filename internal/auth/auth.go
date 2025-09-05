@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -94,4 +96,14 @@ func GetBearerToken(headers http.Header) (string, error) {
 	tokenString = strings.TrimSpace(strings.TrimPrefix(tokenString, "Bearer "))
 
 	return tokenString, nil
+}
+
+func MakeRefreshToken() (string, error) {
+	byteToken := make([]byte, 32)
+
+	rand.Read(byteToken)
+
+	refreshToken := hex.EncodeToString(byteToken)
+
+	return refreshToken, nil
 }
