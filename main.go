@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -321,6 +322,16 @@ func (a *apiConfig) getChirps(rw http.ResponseWriter, rq *http.Request) {
 		fmt.Printf("apiConfig.getChirps: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+
+	sortOrder := rq.URL.Query().Get("sort")
+	if sortOrder == "desc" {
+		sort.Slice(
+			rows,
+			func(i, j int) bool {
+				return rows[i].CreatedAt.After(rows[j].CreatedAt)
+			},
+		)
 	}
 
 	chirps := make([]chirp, len(rows))
