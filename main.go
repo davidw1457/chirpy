@@ -26,6 +26,7 @@ func main() {
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	secret := os.Getenv("SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -42,32 +43,43 @@ func main() {
 		Addr:    ":8080",
 	}
 
-	cfg := apiConfig{qry: dbQueries, platform: platform, secret: secret}
+	cfg := apiConfig{
+		qry:      dbQueries,
+		platform: platform,
+		secret:   secret,
+		polkaKey: polkaKey,
+	}
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix(
 		"/app",
 		http.FileServer(http.Dir(".")))))
 
-	mux.HandleFunc("GET /api/healthz", healthz)
-	mux.HandleFunc("GET /api/chirps", cfg.getAllChirps)
-	mux.HandleFunc("GET /admin/metrics", cfg.metrics)
-	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirp)
-	mux.HandleFunc("POST /api/chirps", cfg.postChirp)
-	mux.HandleFunc("POST /admin/reset", cfg.reset)
-	mux.HandleFunc("POST /api/users", cfg.addUser)
-	mux.HandleFunc("POST /api/login", cfg.login)
-	mux.HandleFunc("POST /api/refresh", cfg.refresh)
-	mux.HandleFunc("POST /api/revoke", cfg.revoke)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", cfg.deleteChirpsChirpID)
+
+	mux.HandleFunc("GET /api/healthz", getHealthz)
+	mux.HandleFunc("GET /api/chirps", cfg.getChirps)
+	mux.HandleFunc("GET /admin/metrics", cfg.getMetrics)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirpsChirpID)
+
+	mux.HandleFunc("POST /api/chirps", cfg.postChirps)
+	mux.HandleFunc("POST /admin/reset", cfg.postReset)
+	mux.HandleFunc("POST /api/users", cfg.postUsers)
+	mux.HandleFunc("POST /api/login", cfg.postLogin)
+	mux.HandleFunc("POST /api/refresh", cfg.postRefresh)
+	mux.HandleFunc("POST /api/revoke", cfg.postRevoke)
+	mux.HandleFunc("POST /api/polka/webhooks", cfg.postPolkaWebhooks)
+
+	mux.HandleFunc("PUT /api/users", cfg.putUsers)
 
 	server.ListenAndServe()
 }
 
-func healthz(rw http.ResponseWriter, rq *http.Request) {
+func getHealthz(rw http.ResponseWriter, rq *http.Request) {
 	rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	rw.WriteHeader(http.StatusOK)
 
 	_, err := rw.Write([]byte("OK"))
 	if err != nil {
-		fmt.Printf("healthz: %v\n", err)
+		fmt.Printf("getHealthz: %v\n", err)
 	}
 }
 
@@ -76,6 +88,7 @@ type apiConfig struct {
 	platform       string
 	qry            *database.Queries
 	secret         string
+	polkaKey       string
 }
 
 func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -85,7 +98,7 @@ func (a *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	})
 }
 
-func (a *apiConfig) metrics(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) getMetrics(rw http.ResponseWriter, rq *http.Request) {
 	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 	rw.WriteHeader(http.StatusOK)
 
@@ -98,11 +111,11 @@ func (a *apiConfig) metrics(rw http.ResponseWriter, rq *http.Request) {
 </html>`, a.fileserverHits.Load())
 	_, err := rw.Write([]byte(ht))
 	if err != nil {
-		fmt.Printf("apiConfig.metrics: %v\n", err)
+		fmt.Printf("apiConfig.getMetrics: %v\n", err)
 	}
 }
 
-func (a *apiConfig) reset(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) postReset(rw http.ResponseWriter, rq *http.Request) {
 	if a.platform != "dev" {
 		rw.WriteHeader(http.StatusForbidden)
 		return
@@ -110,7 +123,7 @@ func (a *apiConfig) reset(rw http.ResponseWriter, rq *http.Request) {
 	a.fileserverHits.Store(0)
 	err := a.qry.ResetUsers(rq.Context())
 	if err != nil {
-		fmt.Printf("apiConfig.reset: %v\n", err)
+		fmt.Printf("apiConfig.postReset: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -120,7 +133,7 @@ func (a *apiConfig) reset(rw http.ResponseWriter, rq *http.Request) {
 
 	_, err = rw.Write([]byte("counter reset"))
 	if err != nil {
-		fmt.Printf("apiConfig.reset: %v\n", err)
+		fmt.Printf("apiConfig.postReset: %v\n", err)
 	}
 }
 
@@ -132,7 +145,7 @@ type chirp struct {
 	UserId    uuid.UUID `json:"user_id"`
 }
 
-func (a *apiConfig) postChirp(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) postChirps(rw http.ResponseWriter, rq *http.Request) {
 	type inputChirp struct {
 		Body string `json:"body"`
 	}
@@ -141,21 +154,21 @@ func (a *apiConfig) postChirp(rw http.ResponseWriter, rq *http.Request) {
 	chrp := inputChirp{}
 	err := decoder.Decode(&chrp)
 	if err != nil {
-		fmt.Printf("postChirp: %v\n", err)
+		fmt.Printf("postChirps: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	tokenString, err := auth.GetBearerToken(rq.Header)
 	if err != nil {
-		fmt.Printf("postChirp: %v\n", err)
+		fmt.Printf("postChirps: %v\n", err)
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
 	userID, err := auth.ValidateJWT(tokenString, a.secret)
 	if err != nil {
-		fmt.Printf("postChirp: %v\n", err)
+		fmt.Printf("postChirps: %v\n", err)
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -186,7 +199,7 @@ func (a *apiConfig) postChirp(rw http.ResponseWriter, rq *http.Request) {
 		}
 		dat, err := json.Marshal(respBody)
 		if err != nil {
-			fmt.Printf("postChirp: %v\n", err)
+			fmt.Printf("postChirps: %v\n", err)
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -200,7 +213,7 @@ func (a *apiConfig) postChirp(rw http.ResponseWriter, rq *http.Request) {
 		respBody := response{Error: "Chirp is too long"}
 		dat, err := json.Marshal(respBody)
 		if err != nil {
-			fmt.Printf("postChirp: %v\n", err)
+			fmt.Printf("postChirps: %v\n", err)
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -228,7 +241,7 @@ func cleanString(s string) string {
 	return s[1:]
 }
 
-func (a *apiConfig) addUser(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) postUsers(rw http.ResponseWriter, rq *http.Request) {
 	type input struct {
 		Password string `json:"password"`
 		Email    string `json:"email"`
@@ -238,7 +251,7 @@ func (a *apiConfig) addUser(rw http.ResponseWriter, rq *http.Request) {
 	newUser := input{}
 	err := decoder.Decode(&newUser)
 	if err != nil {
-		fmt.Printf("apiConfig.addUser: %v\n", err)
+		fmt.Printf("apiConfig.postUsers: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -250,7 +263,7 @@ func (a *apiConfig) addUser(rw http.ResponseWriter, rq *http.Request) {
 
 	newUser.Password, err = auth.HashPassword(newUser.Password)
 	if err != nil {
-		fmt.Printf("apiConfig.addUser: %v\n", err)
+		fmt.Printf("apiConfig.postUsers: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -263,21 +276,22 @@ func (a *apiConfig) addUser(rw http.ResponseWriter, rq *http.Request) {
 		},
 	)
 	if err != nil {
-		fmt.Printf("apiConfig.addUser: %v\n", err)
+		fmt.Printf("apiConfig.postUsers: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	respBody := user{
-		Id:        r.ID,
-		CreatedAt: r.CreatedAt,
-		UpdatedAt: r.UpdatedAt,
-		Email:     r.Email,
+		Id:          r.ID,
+		CreatedAt:   r.CreatedAt,
+		UpdatedAt:   r.UpdatedAt,
+		Email:       r.Email,
+		IsChirpyRed: r.IsChirpyRed,
 	}
 
 	dat, err := json.Marshal(respBody)
 	if err != nil {
-		fmt.Printf("apiConfig.addUser: %v\n", err)
+		fmt.Printf("apiConfig.postUsers: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -286,10 +300,10 @@ func (a *apiConfig) addUser(rw http.ResponseWriter, rq *http.Request) {
 	rw.Write(dat)
 }
 
-func (a *apiConfig) getAllChirps(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) getChirps(rw http.ResponseWriter, rq *http.Request) {
 	rows, err := a.qry.GetAllChirps(rq.Context())
 	if err != nil {
-		fmt.Printf("apiConfig.getAllChirps: %v\n", err)
+		fmt.Printf("apiConfig.getChirps: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -306,7 +320,7 @@ func (a *apiConfig) getAllChirps(rw http.ResponseWriter, rq *http.Request) {
 	}
 	dat, err := json.Marshal(chirps)
 	if err != nil {
-		fmt.Printf("apiConfig.getAllChirps: %v\n", err)
+		fmt.Printf("apiConfig.getChirps: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -316,20 +330,24 @@ func (a *apiConfig) getAllChirps(rw http.ResponseWriter, rq *http.Request) {
 	rw.Write(dat)
 }
 
-func (a *apiConfig) getChirp(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) getChirpsChirpID(
+	rw http.ResponseWriter,
+	rq *http.Request,
+) {
 	id, err := uuid.Parse(rq.PathValue("chirpID"))
 	if err != nil {
-		fmt.Printf("apiConfig.getChirp: %v\n", err)
+		fmt.Printf("apiConfig.getChirpsChirpID: %v\n", err)
 		rw.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	row, err := a.qry.GetChirp(rq.Context(), id)
 	if errors.Is(err, sql.ErrNoRows) {
+		fmt.Printf("apiConfig.getChirpsChirpID: %v\n", err)
 		rw.WriteHeader(http.StatusNotFound)
 		return
 	} else if err != nil {
-		fmt.Printf("apiConfig.getChirp: %v\n", err)
+		fmt.Printf("apiConfig.getChirpsChripID: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -344,7 +362,7 @@ func (a *apiConfig) getChirp(rw http.ResponseWriter, rq *http.Request) {
 
 	dat, err := json.Marshal(chrp)
 	if err != nil {
-		fmt.Printf("apiConfig.GetChirp: %v\n", err)
+		fmt.Printf("apiConfig.getChirpsChirpID: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -361,9 +379,10 @@ type user struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 
-func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) postLogin(rw http.ResponseWriter, rq *http.Request) {
 	type input struct {
 		Password string `json:"password"`
 		Email    string `json:"email"`
@@ -373,19 +392,22 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 	inp := input{}
 	err := decoder.Decode(&inp)
 	if err != nil {
-		fmt.Printf("apiConfig.login: %v\n", err)
+		fmt.Printf("apiConfig.postLogin: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	row, err := a.qry.GetUserByEmail(rq.Context(), inp.Email)
 	if err != nil {
-		fmt.Printf("apiConfig.login: %v\n", err)
+		fmt.Printf("apiConfig.postLogin: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	if err := auth.CheckPasswordHash(inp.Password, row.HashedPassword); err != nil {
+	if err := auth.CheckPasswordHash(
+		inp.Password,
+		row.HashedPassword,
+	); err != nil {
 		rw.Header().Set("Content-Type", "text/plain")
 		rw.WriteHeader(http.StatusUnauthorized)
 		rw.Write([]byte("Incorrect email or password"))
@@ -394,14 +416,14 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 
 	tokenString, err := auth.MakeJWT(row.ID, a.secret, time.Hour)
 	if err != nil {
-		fmt.Printf("apiConfig.login: %v\n", err)
+		fmt.Printf("apiConfig.postLogin: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	refreshToken, err := auth.MakeRefreshToken()
 	if err != nil {
-		fmt.Printf("apiConfig.login: %v\n", err)
+		fmt.Printf("apiConfig.postLogin: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -414,7 +436,7 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 		},
 	)
 	if err != nil {
-		fmt.Printf("apiConfig.login: %v\n", err)
+		fmt.Printf("apiConfig.postLogin: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -424,13 +446,14 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 		CreatedAt:    row.CreatedAt,
 		UpdatedAt:    row.UpdatedAt,
 		Email:        row.Email,
+		IsChirpyRed:  row.IsChirpyRed,
 		Token:        tokenString,
 		RefreshToken: refreshToken,
 	}
 
 	dat, err := json.Marshal(loggedInUser)
 	if err != nil {
-		fmt.Printf("apiConfig.login: %v\n", err)
+		fmt.Printf("apiConfig.postLogin: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -440,20 +463,21 @@ func (a *apiConfig) login(rw http.ResponseWriter, rq *http.Request) {
 	rw.Write(dat)
 }
 
-func (a *apiConfig) refresh(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) postRefresh(rw http.ResponseWriter, rq *http.Request) {
 	refreshToken, err := auth.GetBearerToken(rq.Header)
 	if err != nil {
-		fmt.Printf("a.refresh: %v\n", err)
+		fmt.Printf("apiConfig.postRefresh: %v\n", err)
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
 	refreshTokenRow, err := a.qry.GetRefreshToken(rq.Context(), refreshToken)
 	if errors.Is(err, sql.ErrNoRows) {
+		fmt.Printf("apiConfig.postRefresh: %v\n", err)
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	} else if err != nil {
-		fmt.Printf("a.refresh: %v\n", err)
+		fmt.Printf("apiConfig.postRefresh: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -464,7 +488,7 @@ func (a *apiConfig) refresh(rw http.ResponseWriter, rq *http.Request) {
 		time.Hour,
 	)
 	if err != nil {
-		fmt.Printf("a.refresh: %v\n", err)
+		fmt.Printf("apiConfig.postRefresh: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -476,7 +500,7 @@ func (a *apiConfig) refresh(rw http.ResponseWriter, rq *http.Request) {
 
 	dat, err := json.Marshal(tokenResp)
 	if err != nil {
-		fmt.Printf("a.refresh: %v\n", err)
+		fmt.Printf("apiConfig.postRefresh: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -486,18 +510,192 @@ func (a *apiConfig) refresh(rw http.ResponseWriter, rq *http.Request) {
 	rw.Write(dat)
 }
 
-func (a *apiConfig) revoke(rw http.ResponseWriter, rq *http.Request) {
+func (a *apiConfig) postRevoke(rw http.ResponseWriter, rq *http.Request) {
 	refreshToken, err := auth.GetBearerToken(rq.Header)
 	if err != nil {
-		fmt.Printf("a.revoke: %v\n", err)
+		fmt.Printf("apiConfig.postRevoke: %v\n", err)
 		rw.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
 	err = a.qry.RevokeRefreshToken(rq.Context(), refreshToken)
 	if err != nil {
-		fmt.Printf("a.revoke: %v\n", err)
+		fmt.Printf("apiConfig.postRevoke: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
 	}
+	rw.WriteHeader(http.StatusNoContent)
+}
+
+func (a *apiConfig) putUsers(rw http.ResponseWriter, rq *http.Request) {
+	tokenString, err := auth.GetBearerToken(rq.Header)
+	if err != nil {
+		fmt.Printf("apiConfig.putUsers: %v\n", err)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenString, a.secret)
+	if err != nil {
+		fmt.Printf("apiConfig.putUsers: %v\n", err)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	type input struct {
+		Password string
+		Email    string
+	}
+
+	decoder := json.NewDecoder(rq.Body)
+	inp := input{}
+	err = decoder.Decode(&inp)
+	if err != nil {
+		fmt.Printf("apiConfig.putUsers: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	inp.Password, err = auth.HashPassword(inp.Password)
+	if err != nil {
+		fmt.Printf("apiConfig.putUsers: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	userRow, err := a.qry.UpdateUser(
+		rq.Context(),
+		database.UpdateUserParams{
+			Email:          inp.Email,
+			HashedPassword: inp.Password,
+			ID:             userID,
+		},
+	)
+	if err != nil {
+		fmt.Printf("apiConfig.putUsers: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	respBody := user{
+		Id:          userRow.ID,
+		CreatedAt:   userRow.CreatedAt,
+		UpdatedAt:   userRow.UpdatedAt,
+		Email:       userRow.Email,
+		IsChirpyRed: userRow.IsChirpyRed,
+	}
+
+	dat, err := json.Marshal(respBody)
+	if err != nil {
+		fmt.Printf("apiConfig.putUsers: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	rw.Write(dat)
+}
+
+func (a *apiConfig) deleteChirpsChirpID(
+	rw http.ResponseWriter,
+	rq *http.Request,
+) {
+	chirpID, err := uuid.Parse(rq.PathValue("chirpID"))
+	if err != nil {
+		fmt.Printf("apiConfig.deleteChirpsChirpID: %v\n", err)
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	chirp, err := a.qry.GetChirp(rq.Context(), chirpID)
+	if errors.Is(err, sql.ErrNoRows) {
+		fmt.Printf("apiConfig.deleteChirpsChirpID: %v\n", err)
+		rw.WriteHeader(http.StatusNotFound)
+		return
+	} else if err != nil {
+		fmt.Printf("apiConfig.deleteChirpsChirpID: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	tokenString, err := auth.GetBearerToken(rq.Header)
+	if err != nil {
+		fmt.Printf("apiConfig.deleteChirpsChirpID: %v\n", err)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(tokenString, a.secret)
+	if err != nil {
+		fmt.Printf("apiConfig.deleteChirpsChirpID: %v\n", err)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	if chirp.UserID != userID {
+		rw.WriteHeader(http.StatusForbidden)
+		return
+	}
+
+	err = a.qry.DeleteChirp(rq.Context(), chirpID)
+	if err != nil {
+		fmt.Printf("apiConfig.deleteChirpsChirpID: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
+}
+
+func (a *apiConfig) postPolkaWebhooks(
+	rw http.ResponseWriter,
+	rq *http.Request,
+) {
+	apiKey, err := auth.GetAPIKey(rq.Header)
+	if err != nil || apiKey != a.polkaKey {
+		fmt.Printf("apiConfig.postPolkaWebhooks: %v\n", err)
+		rw.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	type input struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	decoder := json.NewDecoder(rq.Body)
+	inp := input{}
+	err = decoder.Decode(&inp)
+	if err != nil {
+		fmt.Printf("apiConfig.postPolkaWebhooks: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if inp.Event != "user.upgraded" {
+		rw.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	userID, err := uuid.Parse(inp.Data.UserID)
+	if err != nil {
+		fmt.Printf("apiConfig.postPolkaWebhooks: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	_, err = a.qry.UpdateToChirpyRed(rq.Context(), userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		fmt.Printf("apiConfig.postPolkaWebhooks: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	} else if err != nil {
+		fmt.Printf("apiConfig.postPolkaWebhooks: %v\n", err)
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	rw.WriteHeader(http.StatusNoContent)
 }

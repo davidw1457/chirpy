@@ -91,6 +91,8 @@ func GetBearerToken(headers http.Header) (string, error) {
 	tokenString := headers.Get("Authorization")
 	if tokenString == "" {
 		return "", fmt.Errorf("No token string provided")
+	} else if !strings.HasPrefix(tokenString, "Bearer") {
+		return "", fmt.Errorf("No bearer token provided")
 	}
 
 	tokenString = strings.TrimSpace(strings.TrimPrefix(tokenString, "Bearer "))
@@ -106,4 +108,17 @@ func MakeRefreshToken() (string, error) {
 	refreshToken := hex.EncodeToString(byteToken)
 
 	return refreshToken, nil
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	tokenString := headers.Get("Authorization")
+	if tokenString == "" {
+		return "", fmt.Errorf("No apikey provided")
+	} else if !strings.HasPrefix(tokenString, "ApiKey") {
+		return "", fmt.Errorf("No apikey provided")
+	}
+
+	tokenString = strings.TrimSpace(strings.TrimPrefix(tokenString, "ApiKey "))
+
+	return tokenString, nil
 }
