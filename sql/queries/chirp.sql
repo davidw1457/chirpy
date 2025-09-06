@@ -17,3 +17,8 @@ WHERE id = $1;
 DELETE
 FROM chirps
 WHERE id = $1;
+
+-- name: GetChirpsByUserID :many
+SELECT *
+FROM chirps
+WHERE user_id = $1;

@@ -301,7 +301,22 @@ func (a *apiConfig) postUsers(rw http.ResponseWriter, rq *http.Request) {
 }
 
 func (a *apiConfig) getChirps(rw http.ResponseWriter, rq *http.Request) {
-	rows, err := a.qry.GetAllChirps(rq.Context())
+	authorID := rq.URL.Query().Get("author_id")
+
+	var rows []database.Chirp
+	var err error
+
+	if authorID == "" {
+		rows, err = a.qry.GetAllChirps(rq.Context())
+	} else {
+		userID, err := uuid.Parse(authorID)
+		if err != nil {
+			fmt.Printf("apiConfig.getChirps: %v\n", err)
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		rows, err = a.qry.GetChirpsByUserID(rq.Context(), userID)
+	}
 	if err != nil {
 		fmt.Printf("apiConfig.getChirps: %v\n", err)
 		rw.WriteHeader(http.StatusInternalServerError)
